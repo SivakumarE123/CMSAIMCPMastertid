@@ -1,0 +1,236 @@
+
+#from auth import TID_ISSUER, TID_AUDIENCE, TID_SCOPE, _load_oidc_config
+        # -------------------------------------------------------------
+# Tool: protect_multi
+# -------------------------------------------------------------
+# Detects PII entities in the input text and replaces them
+# with anonymized placeholders. Optionally accepts a custom
+# deny list to flag additional terms beyond standard PII.
+# -------------------------------------------------------------
+
+# Configure TID (Trimble ID) JWT verification
+# Discover JWKS via OIDC to avoid hardcoding paths
+
+# if not TID_AUDIENCE:
+#     raise RuntimeError("Missing required environment variable: TID_AUDIENCE")
+# tid_cfg = _load_oidc_config()
+# auth_provider = JWTVerifier(
+#     jwks_uri=tid_cfg["jwks_uri"],
+#     issuer=tid_cfg.get("issuer", TID_ISSUER),
+#     audience=TID_AUDIENCE.split(",") if "," in TID_AUDIENCE else [TID_AUDIENCE],
+#     required_scopes=TID_SCOPE.split() if TID_SCOPE else [],
+# )
+
+# # mcp = FastMCP(name="ai-search-mcp", auth=auth_provider)
+
+# # Build tool description dynamically so callers know valid product values
+# _TOOL_DESC = (
+#     "Perform an Azure AI Search call with progress notifications.\n"
+#     f"Available products: {', '.join(AVAILABLE_PRODUCTS)}.\n"
+#     "Pass one of these product names to select the correct search index."
+# )
+# ============================================================
+# 🔐 LOCK (PREVENT DB STORM)
+# ============================================================
+
+
+# ============================================================
+# MCP Server for PII Protection and Document OCR (WITH AUTH)
+# ============================================================
+
+import os
+from fastmcp import FastMCP, Context
+from denylist import apply_multiple_deny_lists
+from mistral import process_mistral_ocr
+import json
+import asyncio
+from dotenv import load_dotenv
+
+from cachetools import TTLCache
+from cosmosservice import get_user_permissions
+
+load_dotenv()
+
+mcp = FastMCP("presidopii")
+
+# ============================================================
+# L1 CACHE
+# ============================================================
+
+CACHE = TTLCache(maxsize=10000, ttl=30)
+
+def get_cache(key):
+    return CACHE.get(key)
+
+def set_cache(key, value):
+    CACHE[key] = value
+
+
+# ============================================================
+# LOCK (PREVENT DB STORM)
+# ============================================================
+
+LOCKS = {}
+
+
+# ============================================================
+# USER CONTEXT (CACHE + COSMOS)
+# ============================================================
+
+async def get_user_context(ctx: Context, email: str = None):
+
+    # Use passed email, fallback to env variable
+    if not email:
+        email = os.getenv("DEFAULT_USER_EMAIL", "")
+
+    # 1️⃣ L1 cache
+    user = get_cache(email)
+    if user:
+        return user, email
+
+    # 2️⃣ Lock per user
+    if email not in LOCKS:
+        LOCKS[email] = asyncio.Lock()
+
+    async with LOCKS[email]:
+
+        # double check
+        user = get_cache(email)
+        if user:
+            return user, email
+
+        # 3️⃣ Cosmos (SYNC → THREAD)
+        user = await asyncio.to_thread(get_user_permissions, email)
+
+        if not user:
+            return None, email
+
+        # 4️⃣ Cache
+        set_cache(email, user)
+
+        return user, email
+
+
+def invalidate_cache(email: str):
+    """Remove a user from cache so next call re-fetches from Cosmos."""
+    CACHE.pop(email, None)
+
+
+async def get_user_context_fresh(email: str):
+    """Force re-fetch from Cosmos, bypassing cache."""
+    invalidate_cache(email)
+    user = await asyncio.to_thread(get_user_permissions, email)
+    if user:
+        set_cache(email, user)
+    return user
+
+
+# ============================================================
+# AUTH CHECK
+# ============================================================
+
+def check_access(user, product):
+    return product in user.get("products", [])
+
+
+# ============================================================
+# Tool: protect_multi
+# ============================================================
+
+@mcp.tool()
+async def protect_multi(text: str, deny_lists: str, email: str = "", *, ctx: Context) -> dict:
+
+    user, email = await get_user_context(ctx, email)
+
+    if not user or not check_access(user, "pii"):
+        # Re-fetch from Cosmos in case cache was stale
+        user = await get_user_context_fresh(email)
+        if not user or not check_access(user, "pii"):
+            return {"status": "unauthorized", "error": "Access Denied: You do not have permission to use PII Protection"}
+
+    deny_dict = json.loads(deny_lists)
+
+    result = apply_multiple_deny_lists(
+        text=text,
+        deny_lists=deny_dict
+    )
+
+    return {
+        "original": text,
+        "anonymized": result
+    }
+
+
+# ============================================================
+# Tool: mistral_ocr
+# ============================================================
+
+# @mcp.tool()
+# async def mistral_ocr(file_base64: str, mime_type: str, ctx: Context) -> dict:
+
+#     user = await get_user_context(ctx)
+
+#     if not user or not check_access(user, "ocr"):
+#         return {"error": "Unauthorized"}
+
+#     result = await process_mistral_ocr(
+#         file_base64=file_base64,
+#         mime_type=mime_type
+#     )
+
+#     return {
+#         "status": "success" if "error" not in result else "failed",
+#         "data": result
+#     }
+
+@mcp.tool()
+async def mistral_ocr(file_base64: str, mime_type: str, email: str = "", *, ctx: Context):
+
+    user, email = await get_user_context(ctx, email)
+
+    if not user or not check_access(user, "ocr"):
+        # Re-fetch from Cosmos in case cache was stale
+        user = await get_user_context_fresh(email)
+        if not user or not check_access(user, "ocr"):
+            return {"status": "unauthorized", "error": "Access Denied: You do not have permission to use OCR"}
+
+    result = await process_mistral_ocr(file_base64, mime_type)
+
+    if "error" in result:
+        return {
+            "status": "failed",
+            "error": result["error"]
+        }
+
+    return result
+# ============================================================
+# OPTIONAL AUTH TOOL
+# ============================================================
+
+@mcp.tool("authorize_user")
+async def authorize_user(product: str, ctx: Context):
+
+    user, email = await get_user_context(ctx)
+
+    if not user:
+        return {"error": "User not found"}
+
+    return {
+        "user": user["email"],
+        "product": product,
+        "authorized": check_access(user, product)
+    }
+
+
+# ============================================================
+# RUN
+# ============================================================
+
+if __name__ == "__main__":
+    mcp.run(
+        transport="streamable-http",
+        host="0.0.0.0",
+        port=8090,
+        path="/mcp",
+        log_level="info"
+    )
