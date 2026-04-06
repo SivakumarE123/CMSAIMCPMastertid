@@ -19,3 +19,6 @@ aiohttp
 httpx
 PyJWT[crypto]
 mcp
+azure-functions
+presidio
+httpx
