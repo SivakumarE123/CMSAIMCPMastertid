@@ -221,16 +221,18 @@ async def authorize_user(product: str, ctx: Context):
         "authorized": check_access(user, product)
     }
 
+app = mcp
+
 
 # ============================================================
 # RUN
 # ============================================================
 
-if __name__ == "__main__":
-    mcp.run(
-        transport="streamable-http",
-        host="0.0.0.0",
-        port=8090,
-        path="/mcp",
-        log_level="info"
-    )
+# if __name__ == "__main__":
+#     mcp.run(
+#         transport="streamable-http",
+#         host="0.0.0.0",
+#         port=8090,
+#         path="/mcp",
+#         log_level="info"
+#     )
