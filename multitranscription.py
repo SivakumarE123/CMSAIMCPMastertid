@@ -292,8 +292,9 @@ def get_batch_transcription_result(job_url):
                 if content_resp.status_code == 200:
                     content = content_resp.json()
                     source_url = content.get("source", "")
-                    for phrase in content.get("combinedRecognizedPhrases", []):
-                        file_text += phrase.get("display", "") + "\n"
+                    phrases = content.get("combinedRecognizedPhrases", [])
+                    if phrases:
+                        file_text += phrases[0].get("display", "") + "\n"
 
             file_text = file_text.strip()
             file_results.append({
