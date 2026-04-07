@@ -273,7 +273,7 @@ if __name__ == "__main__":
     mcp.run(
         transport="streamable-http",
         host="0.0.0.0",
-        port=8090,
+        port=int(os.environ["PORT"]),  # Azure-provided port
         path="/mcp",
         log_level="info"
     )
