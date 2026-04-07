@@ -15,8 +15,6 @@ from googleapiclient.http import MediaIoBaseDownload
 import io
 import re
 
-from moviepy import VideoFileClip
-
 # ===== INIT =====
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -51,17 +49,6 @@ def generate_sas_url(blob_name):
     return f"https://{ACCOUNT_NAME}.blob.core.windows.net/{CONTAINER}/{blob_name}?{sas_token}"
 
 
-# ===== VIDEO → AUDIO =====
-def extract_audio_from_video(file_path):
-    audio_path = file_path.replace(".mp4", ".wav")
-
-    clip = VideoFileClip(file_path)
-    clip.audio.write_audiofile(audio_path)
-    clip.close()
-
-    return audio_path
-
-
 # ===== UPLOAD FILE → BLOB =====
 def upload_file_to_blob(file_path):
     blob_name = os.path.basename(file_path)
@@ -84,14 +71,7 @@ def handle_base64_input(base64_data, filename="audio.wav"):
     temp_file.write(file_bytes)
     temp_file.close()
 
-    file_path = temp_file.name
-
-    # Detect video vs audio
-    if file_path.endswith((".mp4", ".mov", ".mkv")):
-        logger.info("Detected video input (base64)")
-        file_path = extract_audio_from_video(file_path)
-
-    return upload_file_to_blob(file_path)
+    return upload_file_to_blob(temp_file.name)
 
 
 # ===== GOOGLE DRIVE HANDLER =====
@@ -123,10 +103,7 @@ def handle_gdrive_input(drive_url, creds_dict):
 
     logger.info("Downloaded file from Google Drive")
 
-    # Convert video → audio
-    audio_path = extract_audio_from_video(temp_video.name)
-
-    return upload_file_to_blob(audio_path)
+    return upload_file_to_blob(temp_video.name)
 
 
 # ===== SPEECH API =====
