@@ -42,6 +42,7 @@ import os
 from fastmcp import FastMCP, Context
 from denylist import apply_multiple_deny_lists
 from mistral import process_mistral_ocr
+from videotranscription import process_input as process_video_input, get_transcription_status, get_transcription_result
 import json
 import asyncio
 from dotenv import load_dotenv
@@ -51,7 +52,7 @@ from cosmosservice import get_user_permissions
 
 load_dotenv()
 
-mcp = FastMCP("presidopii")
+mcp = FastMCP("Multitool")
 
 # ============================================================
 # L1 CACHE
@@ -221,18 +222,58 @@ async def authorize_user(product: str, ctx: Context):
         "authorized": check_access(user, product)
     }
 
-app = mcp
+
+# ============================================================
+# Tool: video_transcribe
+# ============================================================
+
+@mcp.tool()
+async def video_transcribe(file_base64: str, filename: str = "audio.wav", email: str = "", *, ctx: Context) -> dict:
+
+    user, email = await get_user_context(ctx, email)
+
+    if not user or not check_access(user, "transcription"):
+        user = await get_user_context_fresh(email)
+        if not user or not check_access(user, "transcription"):
+            return {"status": "unauthorized", "error": "Access Denied: You do not have permission to use Video Transcription"}
+
+    try:
+        result = await asyncio.to_thread(process_video_input, "base64", file_base64, None, filename)
+        return {
+            "status": "success",
+            "blob_url": result.get("blob_url", ""),
+            "speech_job_url": result.get("speech_job_url", "")
+        }
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
+
+
+@mcp.tool()
+async def transcription_status(job_url: str, email: str = "", *, ctx: Context) -> dict:
+
+    user, email = await get_user_context(ctx, email)
+
+    if not user or not check_access(user, "transcription"):
+        user = await get_user_context_fresh(email)
+        if not user or not check_access(user, "transcription"):
+            return {"status": "unauthorized", "error": "Access Denied"}
+
+    try:
+        result = await asyncio.to_thread(get_transcription_result, job_url)
+        return {"status": "success", "data": result}
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
 
 
 # ============================================================
 # RUN
 # ============================================================
 
-# if __name__ == "__main__":
-#     mcp.run(
-#         transport="streamable-http",
-#         host="0.0.0.0",
-#         port=8090,
-#         path="/mcp",
-#         log_level="info"
-#     )
+if __name__ == "__main__":
+    mcp.run(
+        transport="streamable-http",
+        host="0.0.0.0",
+        port=8090,
+        path="/mcp",
+        log_level="info"
+    )
