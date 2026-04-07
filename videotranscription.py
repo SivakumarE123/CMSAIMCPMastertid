@@ -213,7 +213,6 @@ def get_transcription_result(job_url):
                 content_resp = requests.get(content_url, headers=headers)
                 if content_resp.status_code == 200:
                     content = content_resp.json()
-                    for phrase in content.get("combinedRecognizedPhrases", []):
-                        transcription_text += phrase.get("display", "") + "\n"
-
-    return {"status": status, "text": transcription_text.strip()}
+                    phrases = content.get("combinedRecognizedPhrases", [])
+                    if phrases:
+                        transcription_text += phrases[0].get("display", "") + "\n"
