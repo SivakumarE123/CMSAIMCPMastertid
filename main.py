@@ -43,6 +43,7 @@ from fastmcp import FastMCP, Context
 from denylist import apply_multiple_deny_lists
 from mistral import process_mistral_ocr
 from videotranscription import process_input as process_video_input, get_transcription_status, get_transcription_result
+from multitranscription import process_batch_input, get_batch_transcription_result, encrypt_secret
 import json
 import asyncio
 from dotenv import load_dotenv
@@ -266,9 +267,84 @@ async def transcription_status(job_url: str, email: str = "", *, ctx: Context) -
 
 
 # ============================================================
+# Tool: multi_transcribe (Batch: multiple files from mixed sources)
+# ============================================================
+
+@mcp.tool()
+async def multi_transcribe(sources_json: str, email: str = "", *, ctx: Context) -> dict:
+    """Submit multiple files for batch transcription.
+    sources_json: JSON array of source items, each with source_type, data, filename, creds_encrypted.
+    """
+
+    user, email = await get_user_context(ctx, email)
+
+    if not user or not check_access(user, "transcription"):
+        user = await get_user_context_fresh(email)
+        if not user or not check_access(user, "transcription"):
+            return {"status": "unauthorized", "error": "Access Denied: You do not have permission to use Transcription"}
+
+    try:
+        result = await asyncio.to_thread(process_batch_input, sources_json)
+        return {
+            "status": "success",
+            "files": result.get("files", []),
+            "speech_job_url": result.get("speech_job_url", ""),
+            "total": result.get("total", 0),
+            "uploaded": result.get("uploaded", 0),
+            "failed": result.get("failed", 0)
+        }
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
+
+
+@mcp.tool()
+async def multi_transcription_status(job_url: str, email: str = "", *, ctx: Context) -> dict:
+    """Check batch transcription status with per-file results."""
+
+    user, email = await get_user_context(ctx, email)
+
+    if not user or not check_access(user, "transcription"):
+        user = await get_user_context_fresh(email)
+        if not user or not check_access(user, "transcription"):
+            return {"status": "unauthorized", "error": "Access Denied"}
+
+    try:
+        result = await asyncio.to_thread(get_batch_transcription_result, job_url)
+        return {"status": "success", "data": result}
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
+
+
+@mcp.tool()
+async def encrypt_user_secret(plain_text: str, email: str = "", *, ctx: Context) -> dict:
+    """Encrypt a secret (e.g. Google creds JSON) so it can be safely passed to multi_transcribe."""
+
+    user, email = await get_user_context(ctx, email)
+
+    if not user or not check_access(user, "transcription"):
+        user = await get_user_context_fresh(email)
+        if not user or not check_access(user, "transcription"):
+            return {"status": "unauthorized", "error": "Access Denied"}
+
+    try:
+        encrypted = encrypt_secret(plain_text)
+        return {"status": "success", "encrypted": encrypted}
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
+
+
+# ============================================================
 # RUN
 # ============================================================
 
+# if __name__ == "__main__":
+#     mcp.run(
+#         transport="streamable-http",
+#         host="0.0.0.0",
+#         port=8090,
+#         path="/mcp",
+#         log_level="info"
+#     )
 if __name__ == "__main__":
     mcp.run(
         transport="streamable-http",
