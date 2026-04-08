@@ -400,7 +400,7 @@ async def admin_upsert_user(target_email: str, products_json: str, email: str = 
         result = await asyncio.to_thread(cosmos_upsert_user, target_email, products)
         # Invalidate cache for the target user
         invalidate_cache(target_email)
-        return {"status": "success", **result}
+        return {"status": "success", "result": result.get("status", ""), "email": target_email, "products": products}
     except Exception as e:
         return {"status": "failed", "error": str(e)}
 
@@ -416,9 +416,10 @@ async def admin_delete_user(target_email: str, email: str = "", *, ctx: Context)
     try:
         result = await asyncio.to_thread(cosmos_delete_user, target_email)
         invalidate_cache(target_email)
-        return {"status": "success", **result}
+        return {"status": "success", "result": result.get("status", ""), "email": target_email}
     except Exception as e:
         return {"status": "failed", "error": str(e)}
+
 
 # ============================================================
 # RUN
