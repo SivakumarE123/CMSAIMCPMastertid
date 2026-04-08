@@ -351,15 +351,31 @@ def process_batch_input(sources_json):
         # Azure Blob: detect container URL and expand
         if src_type == "blob_url" and is_container_url(data):
             logger.info(f"Expanding blob container URL: {data[:80]}...")
+            # Validate SAS has list permission before attempting
+            qs = parse_qs(urlparse(data).query)
+            sp = qs.get("sp", [""])[0]
+            if sp and "l" not in sp:
+                err_msg = (f"SAS token has sp={sp} but needs 'l' (list) permission. "
+                           f"Regenerate SAS with sp=rl (read+list) or sp=rwl.")
+                logger.error(f"Container expansion blocked: {err_msg}")
+                expanded.append({
+                    "source_type": "_error",
+                    "data": "",
+                    "filename": item.get("filename", "container"),
+                    "creds_encrypted": "",
+                    "_expand_error": err_msg,
+                })
+                continue
             try:
                 blobs = list_container_blobs(data)
                 if not blobs:
                     logger.warning("Container listed 0 audio/video files")
                     expanded.append({
-                        "source_type": "blob_url",
-                        "data": data,
+                        "source_type": "_error",
+                        "data": "",
                         "filename": "container (empty)",
                         "creds_encrypted": "",
+                        "_expand_error": "No audio/video files found in container",
                     })
                 else:
                     for b in blobs:
@@ -373,11 +389,11 @@ def process_batch_input(sources_json):
             except Exception as e:
                 logger.error(f"Container expansion failed: {e}")
                 expanded.append({
-                    "source_type": "blob_url",
-                    "data": data,
+                    "source_type": "_error",
+                    "data": "",
                     "filename": item.get("filename", "container"),
                     "creds_encrypted": "",
-                    "_expand_error": str(e),
+                    "_expand_error": f"Container listing failed: {e}",
                 })
             continue
 
@@ -391,10 +407,11 @@ def process_batch_input(sources_json):
                 if not drive_files:
                     logger.warning("Drive folder listed 0 audio/video files")
                     expanded.append({
-                        "source_type": "gdrive",
-                        "data": data,
+                        "source_type": "_error",
+                        "data": "",
                         "filename": "folder (empty)",
-                        "creds_encrypted": creds_enc,
+                        "creds_encrypted": "",
+                        "_expand_error": "No audio/video files found in Drive folder",
                     })
                 else:
                     for df in drive_files:
@@ -408,11 +425,11 @@ def process_batch_input(sources_json):
             except Exception as e:
                 logger.error(f"Drive folder expansion failed: {e}")
                 expanded.append({
-                    "source_type": "gdrive",
-                    "data": data,
+                    "source_type": "_error",
+                    "data": "",
                     "filename": item.get("filename", "folder"),
-                    "creds_encrypted": creds_enc,
-                    "_expand_error": str(e),
+                    "creds_encrypted": "",
+                    "_expand_error": f"Drive folder listing failed: {e}",
                 })
             continue
 
@@ -422,12 +439,28 @@ def process_batch_input(sources_json):
     sources = expanded
     logger.info(f"After expansion: {len(sources)} source(s)")
 
+    # Separate expansion errors from real sources
+    expand_errors = [s for s in sources if s.get("source_type") == "_error"]
+    real_sources = [s for s in sources if s.get("source_type") != "_error"]
+
+    if expand_errors:
+        for ee in expand_errors:
+            logger.error(f"Expansion error for {ee['filename']}: {ee.get('_expand_error', '')}")
+
+    if not real_sources:
+        error_details = "; ".join(ee.get("_expand_error", "unknown") for ee in expand_errors)
+        raise Exception(f"No files to process after expansion. Errors: {error_details}")
+
     # Parallel upload/resolve
     results = []
     with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = [pool.submit(resolve_source, item) for item in sources]
+        futures = [pool.submit(resolve_source, item) for item in real_sources]
         for f in futures:
             results.append(f.result())
+
+    # Add expansion errors as failed files in results
+    for ee in expand_errors:
+        results.append({"name": ee["filename"], "blob_url": None, "error": ee.get("_expand_error", "expansion failed")})
 
     # Separate success / failed
     blob_urls = []
