@@ -242,6 +242,7 @@ async def video_transcribe(file_base64: str, filename: str = "audio.wav", email:
         result = await asyncio.to_thread(process_video_input, "base64", file_base64, None, filename)
         return {
             "status": "success",
+            "filename": filename,
             "blob_url": result.get("blob_url", ""),
             "speech_job_url": result.get("speech_job_url", "")
         }
@@ -337,19 +338,19 @@ async def encrypt_user_secret(plain_text: str, email: str = "", *, ctx: Context)
 # RUN
 # ============================================================
 
-# if __name__ == "__main__":
-#     mcp.run(
-#         transport="streamable-http",
-#         host="0.0.0.0",
-#         port=8090,
-#         path="/mcp",
-#         log_level="info"
-#     )
 if __name__ == "__main__":
     mcp.run(
         transport="streamable-http",
         host="0.0.0.0",
-        port=int(os.environ["PORT"]),  # Azure-provided port
+        port=8090,
         path="/mcp",
         log_level="info"
     )
+# if __name__ == "__main__":
+#     mcp.run(
+#         transport="streamable-http",
+#         host="0.0.0.0",
+#         port=int(os.environ["PORT"]),  # Azure-provided port
+#         path="/mcp",
+#         log_level="info"
+#     )
