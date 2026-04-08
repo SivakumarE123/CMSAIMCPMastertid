@@ -338,14 +338,6 @@ async def encrypt_user_secret(plain_text: str, email: str = "", *, ctx: Context)
 # RUN
 # ============================================================
 
-# if __name__ == "__main__":
-#     mcp.run(
-#         transport="streamable-http",
-#         host="0.0.0.0",
-#         port=8090,
-#         path="/mcp",
-#         log_level="info"
-#     )
 if __name__ == "__main__":
     mcp.run(
         transport="streamable-http",
