@@ -50,6 +50,10 @@ from dotenv import load_dotenv
 
 from cachetools import TTLCache
 from cosmosservice import get_user_permissions
+from cosmosservice import upsert_user as cosmos_upsert_user
+from cosmosservice import list_all_users as cosmos_list_all_users
+from cosmosservice import get_all_products as cosmos_get_all_products
+from cosmosservice import delete_user as cosmos_delete_user
 
 load_dotenv()
 
@@ -333,6 +337,88 @@ async def encrypt_user_secret(plain_text: str, email: str = "", *, ctx: Context)
     except Exception as e:
         return {"status": "failed", "error": str(e)}
 
+
+# ============================================================
+# Tool: get_user_permissions (for app.py to fetch on login)
+# ============================================================
+
+@mcp.tool()
+async def get_permissions(email: str = "", *, ctx: Context) -> dict:
+    """Get user permissions from Cosmos DB."""
+    user, email = await get_user_context(ctx, email)
+    if not user:
+        return {"status": "not_found", "email": email, "products": []}
+    return {"status": "success", "email": email, "products": user.get("products", [])}
+
+
+# ============================================================
+# Admin Tools (require "admin" product)
+# ============================================================
+
+@mcp.tool()
+async def admin_list_users(email: str = "", *, ctx: Context) -> dict:
+    """List all users and their permissions. Requires admin role."""
+    user, email = await get_user_context(ctx, email)
+    if not user or not check_access(user, "admin"):
+        user = await get_user_context_fresh(email)
+        if not user or not check_access(user, "admin"):
+            return {"status": "unauthorized", "error": "Admin access required"}
+    try:
+        users = await asyncio.to_thread(cosmos_list_all_users)
+        return {"status": "success", "users": users}
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
+
+
+@mcp.tool()
+async def admin_get_products(email: str = "", *, ctx: Context) -> dict:
+    """Get all distinct product names across all users. Requires admin role."""
+    user, email = await get_user_context(ctx, email)
+    if not user or not check_access(user, "admin"):
+        user = await get_user_context_fresh(email)
+        if not user or not check_access(user, "admin"):
+            return {"status": "unauthorized", "error": "Admin access required"}
+    try:
+        products = await asyncio.to_thread(cosmos_get_all_products)
+        return {"status": "success", "products": products}
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
+
+
+@mcp.tool()
+async def admin_upsert_user(target_email: str, products_json: str, email: str = "", *, ctx: Context) -> dict:
+    """Create or update a user's product permissions. Requires admin role.
+    products_json: JSON array of product names, e.g. '["pii","ocr"]'
+    """
+    user, email = await get_user_context(ctx, email)
+    if not user or not check_access(user, "admin"):
+        user = await get_user_context_fresh(email)
+        if not user or not check_access(user, "admin"):
+            return {"status": "unauthorized", "error": "Admin access required"}
+    try:
+        products = json.loads(products_json)
+        result = await asyncio.to_thread(cosmos_upsert_user, target_email, products)
+        # Invalidate cache for the target user
+        invalidate_cache(target_email)
+        return {"status": "success", **result}
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
+
+
+@mcp.tool()
+async def admin_delete_user(target_email: str, email: str = "", *, ctx: Context) -> dict:
+    """Delete a user from Cosmos DB. Requires admin role."""
+    user, email = await get_user_context(ctx, email)
+    if not user or not check_access(user, "admin"):
+        user = await get_user_context_fresh(email)
+        if not user or not check_access(user, "admin"):
+            return {"status": "unauthorized", "error": "Admin access required"}
+    try:
+        result = await asyncio.to_thread(cosmos_delete_user, target_email)
+        invalidate_cache(target_email)
+        return {"status": "success", **result}
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
 
 # ============================================================
 # RUN
