@@ -17,10 +17,27 @@ from googleapiclient.http import MediaIoBaseDownload
 import io
 import re
 
+from urllib.parse import urlparse, parse_qs
+import xml.etree.ElementTree as ET
+
 # ===== INIT =====
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Audio/video extensions for blob container filtering
+_AUDIO_VIDEO_EXTENSIONS = {
+    ".mp4", ".mov", ".mkv", ".wav", ".mp3", ".flac", ".ogg",
+    ".m4a", ".wma", ".aac", ".webm", ".avi",
+}
+
+# MIME types for Google Drive folder filtering
+_DRIVE_AUDIO_VIDEO_MIMES = {
+    "audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/ogg",
+    "audio/flac", "audio/x-flac", "audio/aac", "audio/webm", "audio/x-m4a",
+    "video/mp4", "video/quicktime", "video/x-matroska", "video/webm",
+    "video/x-msvideo", "video/avi",
+}
 
 # ===== ENV =====
 ACCOUNT_NAME = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
@@ -82,6 +99,117 @@ def upload_file_to_blob(file_path):
 
     logger.info(f"Uploaded to blob: {blob_name}")
     return generate_sas_url(blob_name)
+
+
+# ===== CONTAINER / FOLDER HELPERS =====
+
+def is_container_url(url: str) -> bool:
+    """Detect if a blob URL points to a container (no blob path after container name)."""
+    try:
+        parsed = urlparse(url)
+        # Path like /containername or /containername/ (no blob filename)
+        path_parts = [p for p in parsed.path.strip("/").split("/") if p]
+        if len(path_parts) <= 1:
+            # Also check SAS sr=c (container scope)
+            qs = parse_qs(parsed.query)
+            sr = qs.get("sr", [""])[0]
+            if sr == "c" or len(path_parts) <= 1:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def list_container_blobs(container_url: str) -> list:
+    """List audio/video blobs in a container using the Azure Blob REST API.
+    The SAS token must include list (l) and read (r) permissions.
+    Returns list of full blob URLs with the same SAS token.
+    """
+    parsed = urlparse(container_url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+    sas_token = parsed.query  # everything after ?
+
+    # List blobs via REST: ?restype=container&comp=list&<sas>
+    list_url = f"{base_url}?restype=container&comp=list&{sas_token}"
+    logger.info(f"Listing blobs: {list_url[:120]}...")
+
+    resp = requests.get(list_url, timeout=30)
+    if resp.status_code != 200:
+        raise Exception(
+            f"Failed to list blobs (HTTP {resp.status_code}). "
+            f"Ensure the SAS token has List (l) permission. Response: {resp.text[:300]}"
+        )
+
+    # Parse XML response
+    root = ET.fromstring(resp.text)
+    blobs = []
+    for blob_elem in root.iter("Blob"):
+        name_elem = blob_elem.find("Name")
+        if name_elem is None or not name_elem.text:
+            continue
+        blob_name = name_elem.text
+        ext = os.path.splitext(blob_name)[1].lower()
+        if ext in _AUDIO_VIDEO_EXTENSIONS:
+            blob_full_url = f"{base_url}/{blob_name}?{sas_token}"
+            blobs.append({"name": blob_name, "url": blob_full_url})
+            logger.info(f"  Found blob: {blob_name}")
+
+    logger.info(f"Listed {len(blobs)} audio/video blob(s) from container")
+    return blobs
+
+
+def is_drive_folder_url(url: str) -> bool:
+    """Detect if a Google Drive URL points to a folder."""
+    return "/folders/" in url or "mimeType=application/vnd.google-apps.folder" in url
+
+
+def extract_folder_id(url: str) -> str:
+    """Extract folder ID from a Google Drive folder URL."""
+    match = re.search(r'/folders/([-\w]+)', url)
+    if match:
+        return match.group(1)
+    match = re.search(r'id=([-\w]+)', url)
+    if match:
+        return match.group(1)
+    raise ValueError(f"Cannot extract folder ID from: {url}")
+
+
+def list_drive_folder_files(folder_url: str, creds_dict: dict) -> list:
+    """List audio/video files in a Google Drive folder.
+    Returns list of dicts: [{"name": str, "url": str, "file_id": str}]
+    """
+    folder_id = extract_folder_id(folder_url)
+    creds = Credentials.from_authorized_user_info(creds_dict)
+    service = build('drive', 'v3', credentials=creds)
+
+    # Build MIME type query
+    mime_clauses = " or ".join(f"mimeType='{m}'" for m in _DRIVE_AUDIO_VIDEO_MIMES)
+    query = f"'{folder_id}' in parents and ({mime_clauses}) and trashed=false"
+
+    files = []
+    page_token = None
+    while True:
+        resp = service.files().list(
+            q=query,
+            fields="nextPageToken, files(id, name, mimeType)",
+            pageSize=100,
+            pageToken=page_token,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        for f in resp.get("files", []):
+            files.append({
+                "name": f["name"],
+                "file_id": f["id"],
+                "url": f"https://drive.google.com/file/d/{f['id']}/view",
+            })
+            logger.info(f"  Found Drive file: {f['name']} ({f['mimeType']})")
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+
+    logger.info(f"Listed {len(files)} audio/video file(s) from Drive folder {folder_id}")
+    return files
 
 
 # ===== SOURCE HANDLERS =====
@@ -212,6 +340,87 @@ def process_batch_input(sources_json):
     sources = json.loads(sources_json)
     if not sources:
         raise ValueError("No sources provided")
+
+    # ---- AUTO-EXPAND containers / folders into individual files ----
+    expanded = []
+    for item in sources:
+        src_type = item.get("source_type", "")
+        data = item.get("data", "")
+        creds_enc = item.get("creds_encrypted", "")
+
+        # Azure Blob: detect container URL and expand
+        if src_type == "blob_url" and is_container_url(data):
+            logger.info(f"Expanding blob container URL: {data[:80]}...")
+            try:
+                blobs = list_container_blobs(data)
+                if not blobs:
+                    logger.warning("Container listed 0 audio/video files")
+                    expanded.append({
+                        "source_type": "blob_url",
+                        "data": data,
+                        "filename": "container (empty)",
+                        "creds_encrypted": "",
+                    })
+                else:
+                    for b in blobs:
+                        expanded.append({
+                            "source_type": "blob_url",
+                            "data": b["url"],
+                            "filename": b["name"],
+                            "creds_encrypted": "",
+                        })
+                    logger.info(f"Expanded container into {len(blobs)} blob source(s)")
+            except Exception as e:
+                logger.error(f"Container expansion failed: {e}")
+                expanded.append({
+                    "source_type": "blob_url",
+                    "data": data,
+                    "filename": item.get("filename", "container"),
+                    "creds_encrypted": "",
+                    "_expand_error": str(e),
+                })
+            continue
+
+        # Google Drive: detect folder URL and expand
+        if src_type == "gdrive" and is_drive_folder_url(data):
+            logger.info(f"Expanding Drive folder URL: {data[:80]}...")
+            try:
+                creds_json = decrypt_secret(creds_enc)
+                creds_dict = json.loads(creds_json)
+                drive_files = list_drive_folder_files(data, creds_dict)
+                if not drive_files:
+                    logger.warning("Drive folder listed 0 audio/video files")
+                    expanded.append({
+                        "source_type": "gdrive",
+                        "data": data,
+                        "filename": "folder (empty)",
+                        "creds_encrypted": creds_enc,
+                    })
+                else:
+                    for df in drive_files:
+                        expanded.append({
+                            "source_type": "gdrive",
+                            "data": df["url"],
+                            "filename": df["name"],
+                            "creds_encrypted": creds_enc,
+                        })
+                    logger.info(f"Expanded Drive folder into {len(drive_files)} file source(s)")
+            except Exception as e:
+                logger.error(f"Drive folder expansion failed: {e}")
+                expanded.append({
+                    "source_type": "gdrive",
+                    "data": data,
+                    "filename": item.get("filename", "folder"),
+                    "creds_encrypted": creds_enc,
+                    "_expand_error": str(e),
+                })
+            continue
+
+        # Not a container/folder — keep as-is
+        expanded.append(item)
+
+    sources = expanded
+    logger.info(f"After expansion: {len(sources)} source(s)")
 
     # Parallel upload/resolve
     results = []
