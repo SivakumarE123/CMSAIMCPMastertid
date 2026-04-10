@@ -1,4 +1,3 @@
-
 #from auth import TID_ISSUER, TID_AUDIENCE, TID_SCOPE, _load_oidc_config
         # -------------------------------------------------------------
 # Tool: protect_multi
@@ -429,7 +428,7 @@ if __name__ == "__main__":
     mcp.run(
         transport="streamable-http",
         host="0.0.0.0",
-        port=int(os.environ["PORT"]),  # Azure-provided port
+        port=int(os.environ.get("PORT", "8090")),
         path="/mcp",
         log_level="info"
     )
